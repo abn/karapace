@@ -7,7 +7,7 @@ See LICENSE for details
 from kafka import KafkaProducer
 from karapace import version as karapace_version
 from karapace.compatibility import Compatibility, IncompatibleSchema
-from karapace.config import set_config_defaults
+from karapace.config import read_config
 from karapace.master_coordinator import MasterCoordinator
 from karapace.rapu import HTTPResponse, RestApp
 from karapace.schema_reader import KafkaSchemaReader
@@ -16,7 +16,6 @@ from karapace.utils import json_encode
 import argparse
 import asyncio
 import avro.schema
-import json
 import logging
 import os
 import sys
@@ -40,10 +39,6 @@ TRANSITIVE_MODES = {
     "FORWARD_TRANSITIVE",
     "FULL_TRANSITIVE",
 }
-
-
-class InvalidConfiguration(Exception):
-    pass
 
 
 class Karapace(RestApp):
@@ -127,21 +122,13 @@ class Karapace(RestApp):
 
     @staticmethod
     def read_config(config_path):
-        if os.path.exists(config_path):
-            try:
-                config = json.loads(open(config_path, "r").read())
-                config = set_config_defaults(config)
-                return config
-            except Exception as ex:
-                raise InvalidConfiguration(ex)
-        else:
-            raise InvalidConfiguration()
+        return read_config(config_path)
 
     def _set_log_level(self):
         try:
             logging.getLogger().setLevel(self.config["log_level"])
         except ValueError:
-            self.log.excption("Problem with log_level: %r", self.config["log_level"])
+            self.log.exception("Problem with log_level: %r", self.config["log_level"])
 
     def _create_schema_reader(self):
         self.ksr = KafkaSchemaReader(config=self.config, )
