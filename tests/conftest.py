@@ -7,6 +7,7 @@ See LICENSE for details
 from karapace.karapace import Karapace
 from karapace.serialization import SchemaRegistryBasicClientLocal
 from unittest.mock import MagicMock
+
 import avro
 import contextlib
 import json
@@ -66,11 +67,16 @@ def create_basic_registry_client():
         "namespace": "example.avro",
         "type": "record",
         "name": "User",
-        "fields": [
-            {"name": "name", "type": "string"},
-            {"name": "favorite_number",  "type": ["int", "null"]},
-            {"name": "favorite_color", "type": ["string", "null"]}
-        ]
+        "fields": [{
+            "name": "name",
+            "type": "string"
+        }, {
+            "name": "favorite_number",
+            "type": ["int", "null"]
+        }, {
+            "name": "favorite_color",
+            "type": ["string", "null"]
+        }]
     })
     cli = SchemaRegistryBasicClientLocal(krp=None)
     cli.get_schema_for_id = MagicMock(return_value=avro.schema.parse(schema_json))
