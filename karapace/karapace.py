@@ -7,7 +7,7 @@ See LICENSE for details
 from aiokafka.producer import AIOKafkaProducer
 from karapace import version as karapace_version
 from karapace.compatibility import Compatibility, IncompatibleSchema
-from karapace.config import set_config_defaults, create_ssl_context
+from karapace.config import create_ssl_context, set_config_defaults
 from karapace.master_coordinator import MasterCoordinator
 from karapace.rapu import HTTPResponse, RestApp
 from karapace.schema_reader import KafkaSchemaReader
@@ -47,8 +47,9 @@ class InvalidConfiguration(Exception):
 
 
 class Karapace(RestApp):
-    def __init__(self, config_path):
+    def __init__(self, config_path, *, loop=None):
         self.config = {}
+        self.loop = loop or asyncio.get_event_loop()
         self.config_path = config_path
         self.config = self.read_config(self.config_path)
         self._sentry_config = self.config.get("sentry", {"dsn": None}).copy()
@@ -108,20 +109,21 @@ class Karapace(RestApp):
         self.ksr = None
         self._set_log_level()
         self._create_producer()
-        self.app.on_startup.append(self._create_schema_reader)
-        self.app.on_startup.append(self._create_master_coordinator)
+        self.producer_started = asyncio.ensure_future(self.producer.start(), loop=self.loop)
+        self._create_schema_reader()
+        self._create_master_coordinator()
         self.app.on_startup.append(self.create_http_client)
-        self.app.on_shutdown.append(self.producer.client.close)
         self.master_lock = asyncio.Lock()
 
         self.log.info("Karapace initialized")
 
-    def close(self):
-        self.log.info("Shutting down all auxiliary threads")
+    async def close(self):
+        self.log.info("Shutting down all background tasks")
+        await self.producer.stop()
         if self.mc:
-            self.mc.close()
+            await self.mc.close()
         if self.ksr:
-            self.ksr.close()
+            await self.ksr.close()
 
     @staticmethod
     def read_config(config_path):
@@ -142,19 +144,19 @@ class Karapace(RestApp):
             self.log.exception("Problem with log_level: %r", self.config["log_level"])
 
     def _create_schema_reader(self):
-        self.ksr = KafkaSchemaReader(config=self.config)
+        self.ksr = KafkaSchemaReader(config=self.config, loop=self.loop)
 
     def _create_master_coordinator(self):
-        self.mc = MasterCoordinator(config=self.config)
+        self.mc = MasterCoordinator(config=self.config, loop=self.loop)
 
     def _create_producer(self):
         self.producer = AIOKafkaProducer(
             bootstrap_servers=self.config["bootstrap_uri"],
             security_protocol=self.config["security_protocol"],
             ssl_context=None if self.config["security_protocol"] != "SSL" else create_ssl_context(self.config),
-            api_version=(1, 0, 0),
+            api_version="1.0.0",
             metadata_max_age_ms=self.config["metadata_max_age_ms"],
-            loop=asyncio.get_event_loop(),
+            loop=self.loop,
         )
 
     def _subject_get(self, subject, content_type):
@@ -209,17 +211,20 @@ class Karapace(RestApp):
                 break
             self.log.error("Put the offset: %r back to queue, someone else is waiting for this?", offset)
             await self.ksr.queue.put(offset)
+            # non blocking prevention of tight loops
+            await asyncio.sleep(0.1)
 
     async def send_kafka_message(self, key, value):
+        await self.producer_started
         if isinstance(key, str):
             key = key.encode("utf8")
         if isinstance(value, str):
             value = value.encode("utf8")
-
+        self.log.debug("Sending kafka msg key: %r, value: %r", key, value)
         future = await self.producer.send(self.config["topic_name"], key=key, value=value)
         await self.producer.flush()
-        msg = future.get(self.kafka_timeout)
-        self.log.debug("Sent kafka msg key: %r, value: %r, offset: %r", key, value, msg.offset)
+        await asyncio.wait_for(future, timeout=self.kafka_timeout)
+        msg = future.result()
         await self.get_offset_from_queue(msg.offset)
         return future
 
@@ -257,12 +262,12 @@ class Karapace(RestApp):
         old = await self.subject_version_get(content_type=content_type, subject=subject, version=version, return_dict=True)
         self.log.info("Existing schema: %r, new_schema: %r", old["schema"], body["schema"])
         try:
-            new = avro.schema.Parse(body["schema"])
+            new = avro.schema.parse(body["schema"])
         except avro.schema.SchemaParseException:
             self.log.warning("Invalid schema: %r", body["schema"])
             self.r(body={"error_code": 44201, "message": "Invalid Avro schema"}, content_type=content_type, status=422)
         try:
-            old_schema = avro.schema.Parse(old["schema"])
+            old_schema = avro.schema.parse(old["schema"])
         except avro.schema.SchemaParseException:
             self.log.warning("Invalid existing schema: %r", old["schema"])
             self.r(body={"error_code": 44201, "message": "Invalid Avro schema"}, content_type=content_type, status=422)
@@ -343,7 +348,7 @@ class Karapace(RestApp):
         self.r(version_list, content_type, status=200)
 
     async def subject_version_get(self, content_type, *, subject, version, return_dict=False):
-        await self._validate_version(content_type, version)
+        self._validate_version(content_type, version)
         subject_data = self._subject_get(subject, content_type)
 
         max_version = max(subject_data["schemas"])
@@ -401,7 +406,7 @@ class Karapace(RestApp):
     async def get_master(self):
         async with self.master_lock:
             while True:
-                master, master_url = self.mc.get_master_info()
+                master, master_url = await self.mc.get_master_info()
                 if master is None:
                     self.log.info("No master set: %r, url: %r", master, master_url)
                 elif self.ksr.ready is False:
@@ -431,7 +436,7 @@ class Karapace(RestApp):
         if "schema" not in body:
             self.r({"error_code": 500, "message": "Internal Server Error"}, content_type, status=500)
         try:
-            new_schema = avro.schema.Parse(body["schema"])
+            new_schema = avro.schema.parse(body["schema"])
         except avro.schema.SchemaParseException:
             self.r(
                 body={
