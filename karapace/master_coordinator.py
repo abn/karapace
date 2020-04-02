@@ -16,6 +16,7 @@ from karapace.config import create_ssl_context
 import asyncio
 import json
 import logging
+
 log = logging.getLogger(__name__)
 # SR group errors
 NO_ERROR = 0

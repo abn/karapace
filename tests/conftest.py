@@ -4,8 +4,11 @@ karapace - conftest
 Copyright (c) 2019 Aiven Ltd
 See LICENSE for details
 """
+from aiokafka.conn import create_conn
+from kafka.protocol.metadata import MetadataRequest
 from karapace.karapace import Karapace
 
+import asyncio
 import contextlib
 import json
 import os
@@ -46,6 +49,20 @@ def wait_for_port(port, *, hostname="127.0.0.1", wait_time=20.0, ipv6=False):
             raise Timeout("Timeout waiting for port {} on host {}".format(port, hostname))
         time.sleep(2.0)
     print("Port {} on host {} started listening in {} seconds".format(port, hostname, time.monotonic() - start_time))
+
+
+async def await_valid_metadata_response(port):
+    c = await create_conn("localhost", port)
+    while True:
+        try:
+            r = await c.send(MetadataRequest[1]([]))
+            if r.brokers:
+                break
+            await asyncio.sleep(1)
+        except:  # pylint: disable=bare-except
+            pass
+    c.close()
+    print("valid metadata response received from server: %r" % r.brokers)
 
 
 def get_random_port(*, start=3000, stop=30000, blacklist=None):
@@ -119,7 +136,9 @@ async def fixture_karapace(session_tmpdir, kafka_server):
             if self.kc:
                 await self.kc.close()
 
-    _instance = _Karapace(datadir=session_tmpdir(), kafka_port=kafka_server["kafka_port"])
+    kafka_port = kafka_server["kafka_port"]
+    _instance = _Karapace(datadir=session_tmpdir(), kafka_port=kafka_port)
+    await await_valid_metadata_response(kafka_port)
     yield _instance.create_service
     await _instance.shutdown()
 

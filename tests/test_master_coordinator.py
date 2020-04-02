@@ -45,8 +45,6 @@ async def test_master_selection(kafka_server):
         if not (mc_aa.sc.master or mc_bb.sc.master or mc_aa.sc.master_url or mc_bb.sc.master_url):
             await asyncio.sleep(1.0)
             continue
-        log.info("mc_aa.sc.master: %r, mc_bb.sc.master: %r, mc_aa.sc.master_url: %r, mc_bb.sc.master_url: %r",
-                 mc_aa.sc.master, mc_bb.sc.master, mc_aa.sc.master_url, mc_bb.sc.master_url)
         assert mc_aa.sc.master is True
         assert mc_bb.sc.master is False
         master_url = "http://{}:{}".format(config_aa["host"], config_aa["port"])
